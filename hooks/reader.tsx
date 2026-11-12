@@ -38,18 +38,22 @@ type Model = {
   showCode: boolean
 }
 
-const PIVOT = 10 // the column the focus letter always sits in
+const SIDE = 12 // characters each side of the focus letter
 const WPM_MIN = 150
 const WPM_MAX = 900
 const WPM_STEP = 25
 const clampWpm = (w: number) => Math.min(WPM_MAX, Math.max(WPM_MIN, Math.round(w)))
 const CLAUDE = '#D97757'
 const YOU = '#5B9BD5'
+const FOCUS = '#FF5555'
+const TRACK = '#3A3A3A'
 
 // One reader instance at a time: what its timer and handlers read.
 let props: ReaderProps = { id: '', msgs: [], dropped: 0, wpm: 300, mode: 'latest', modeSeq: 0 }
 let set: (m: Model) => void = () => {}
 let barWidth = 40
+/** Whether a key has reached the reader yet (it has the focus). */
+let heard = false
 const cache = { key: '', msgs: [] as Msg[], toks: [] as Tok[], starts: [] as number[] }
 
 function data(mode: Mode) {
@@ -65,7 +69,7 @@ function data(mode: Mode) {
 const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p, s) => {
   const { Box, Text, Button, Code } = s.elements
   props = p
-  barWidth = Math.max(10, s.columns || 40)
+  barWidth = Math.max(10, (s.columns || 42) - 2) // less the side padding
   let m = s.state
 
   if (m === undefined) {
@@ -96,6 +100,7 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
     s.onKey(k => {
       const cur = s.state
       if (!cur) return
+      heard = true
       const { toks, starts } = data(cur.mode)
       const total = toks.length
       const key = k.key
@@ -127,9 +132,10 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
     s.onPointer(e => {
       const cur = s.state
       if (!cur || e.type !== 'down' || e.y !== 0) return
+      heard = true
       const { toks, starts } = data(cur.mode)
       if (toks.length === 0) return
-      const at = Math.min(toks.length - 1, Math.floor((e.x / barWidth) * toks.length))
+      const at = Math.min(toks.length - 1, Math.floor((Math.max(0, e.x - 1) / barWidth) * toks.length))
       jump(cur, startOf(starts, at))
     })
 
@@ -153,35 +159,25 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
   const done = total > 0 && m.i >= total
   const tok = toks[Math.min(m.i, total - 1)]
   const msg = tok ? msgs[tok.m] : undefined
-  const who = msg?.r === 'u' ? 'You' : 'Claude'
+  const isYou = msg?.r === 'u'
+  const pct = total === 0 ? 0 : Math.round((Math.min(m.i, total) / total) * 100)
 
-  // The progress bar: one cell per slice of the thread, colored by speaker.
-  const cells: { ch: string; color: string }[] = []
-  for (let x = 0; x < barWidth && total > 0; x++) {
-    const at = Math.min(total - 1, Math.floor((x / barWidth) * total))
-    const r = msgs[toks[at]?.m ?? 0]?.r
-    cells.push({ ch: at < m.i ? '█' : '░', color: r === 'u' ? YOU : CLAUDE })
+  const choose = (mode: Mode) => {
+    const cur = s.state
+    if (!cur || cur.mode === mode) return
+    const next = { ...cur, mode, i: 0, playing: false, showCode: false }
+    set(next)
+    s.post({ wpm: next.wpm, mode })
   }
-  const runs: { ch: string; color: string; n: number }[] = []
-  for (const c of cells) {
-    const last = runs[runs.length - 1]
-    if (last && last.ch === c.ch && last.color === c.color) last.n++
-    else runs.push({ ...c, n: 1 })
-  }
-
   const modeRow = (
-    <Box flexDirection="row" gap={1} flexWrap="wrap">
+    <Box flexDirection="row" gap={2} flexWrap="wrap" justifyContent="center">
       {MODES.map((mode, k) => (
         <Button
           key={`mode-${mode}`}
-          label={`${k + 1} ${MODE_LABEL[mode]}${mode === m.mode ? ' *' : ''}`}
-          onPress={() => {
-            const cur = s.state
-            if (!cur || cur.mode === mode) return
-            const next = { ...cur, mode, i: 0, playing: false, showCode: false }
-            set(next)
-            s.post({ wpm: next.wpm, mode })
-          }}
+          plain
+          hotkey={String(k + 1)}
+          label={`${mode === m.mode ? '\u25cf' : '\u25cb'} ${MODE_LABEL[mode]}`}
+          onPress={() => choose(mode)}
         />
       ))}
     </Box>
@@ -189,7 +185,7 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
 
   if (total === 0) {
     return (
-      <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column" gap={1} paddingX={1} paddingY={1} alignItems="center">
         <Text dimColor>Nothing to read in this view yet.</Text>
         {modeRow}
       </Box>
@@ -199,65 +195,82 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
   let stage
   if (tok?.code && m.showCode && !done) {
     stage = (
-      <Box flexDirection="column">
+      <Box flexDirection="column" gap={1}>
         <Code source={tok.code.source} language={tok.code.lang || undefined} />
-        <Button key="code-back" label="Back to reading (c)" onPress={() => {
-          const cur = s.state
-          if (cur) set({ ...cur, showCode: false })
-        }} />
+        <Box justifyContent="center">
+          <Button key="code-back" label="Back to reading (c)" onPress={() => {
+            const cur = s.state
+            if (cur) set({ ...cur, showCode: false })
+          }} />
+        </Box>
       </Box>
     )
   } else if (tok?.code && !done) {
     stage = (
-      <Box flexDirection="column" paddingY={1} gap={1}>
-        <Text mono size="title" bold color={CLAUDE}>{tok.w}</Text>
-        <Box flexDirection="row" gap={1}>
-          <Button key="code-view" label="View code (c)" onPress={() => {
-            const cur = s.state
-            if (cur) set({ ...cur, playing: false, showCode: true })
-          }} />
-          <Text dimColor>Space skips past it</Text>
-        </Box>
+      <Box flexDirection="column" alignItems="center" paddingY={2} gap={1}>
+        <Text size="title" bold color={CLAUDE}>{tok.w}</Text>
+        <Button key="code-view" label="View code (c)" onPress={() => {
+          const cur = s.state
+          if (cur) set({ ...cur, playing: false, showCode: true })
+        }} />
+        <Text dimColor>Space skips past it</Text>
       </Box>
     )
   } else {
+    // A line of fixed width, centered: the focus letter sits in its middle
+    // whatever the word, so it never moves.
     const word = done ? 'Done.' : (tok?.w ?? '')
     const o = orpIndex(word)
-    const marker = ' '.repeat(PIVOT) + '|'
+    const left = word.slice(0, o)
+    const right = word.slice(o + 1)
+    const pre = ' '.repeat(Math.max(0, SIDE - left.length)) + left
+    const post = right + ' '.repeat(Math.max(0, SIDE - right.length))
+    const guide = ' '.repeat(SIDE) + '\u2502' + ' '.repeat(SIDE)
     stage = (
-      <Box flexDirection="column" paddingY={1}>
-        <Text mono size="title" dimColor>{marker}</Text>
-        <Box flexDirection="row">
-          <Text mono size="title" bold>{' '.repeat(Math.max(0, PIVOT - o)) + word.slice(0, o)}</Text>
-          <Text mono size="title" bold color="red">{word.slice(o, o + 1)}</Text>
-          <Text mono size="title" bold>{word.slice(o + 1)}</Text>
-        </Box>
-        <Text mono size="title" dimColor>{marker}</Text>
+      <Box flexDirection="column" alignItems="center" paddingY={2}>
+        <Text mono size="title" dimColor>{guide}</Text>
+        <Text mono size="title" bold>
+          {pre}
+          <Text color={FOCUS}>{word.slice(o, o + 1)}</Text>
+          {post}
+        </Text>
+        <Text mono size="title" dimColor>{guide}</Text>
       </Box>
     )
   }
 
-  const pct = Math.round((Math.min(m.i, total) / total) * 100)
+  const state = done ? 'Finished' : m.playing ? 'Playing' : 'Paused'
+  const icon = done ? '\u2713' : m.playing ? '\u25b6' : '\u23f8'
   return (
-    <Box flexDirection="column">
-      <Box flexDirection="row">
-        {runs.map((r, k) => (
-          <Text key={`bar-${k}`} color={r.color} dimColor={r.ch === '░'}>{r.ch.repeat(r.n)}</Text>
-        ))}
+    <Box flexDirection="column" paddingX={1}>
+      {/* Progress: one thin bar on the top row (click it to jump). */}
+      <Box flexDirection="row" width="100%" height={1}>
+        <Box width={`${pct}%`} height={1} backgroundColor={CLAUDE} />
+        <Box flexGrow={1} height={1} backgroundColor={TRACK} />
       </Box>
-      <Text>
-        <Text bold color={msg?.r === 'u' ? YOU : CLAUDE}>{who}</Text>
-        <Text dimColor>{`  ·  Message ${(tok?.m ?? 0) + 1} of ${msgs.length}  ·  ${pct}%`}</Text>
-      </Text>
+      <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
+        <Text>
+          <Text bold color={isYou ? YOU : CLAUDE}>{isYou ? 'You' : 'Claude'}</Text>
+          <Text dimColor>{`  Message ${(tok?.m ?? 0) + 1} of ${msgs.length}`}</Text>
+        </Text>
+        <Text dimColor tabular>{`${pct}%`}</Text>
+      </Box>
       {stage}
-      <Text bold>
-        {`${m.wpm} wpm  `}
-        <Text dimColor>{done ? 'Done. Space replays' : m.playing ? 'Playing' : 'Paused'}</Text>
-      </Text>
-      {modeRow}
-      {p.dropped > 0 && <Text dimColor>{`${p.dropped} older messages left out (size limit)`}</Text>}
-      <Text dimColor>Space play/pause · Up/Down speed · Left/Right sentence · 1/2/3 view · click bar to jump</Text>
-      <Text dimColor>Click the panel first so keys reach it; Esc returns to the chat</Text>
+      <Box flexDirection="row" justifyContent="center" gap={2}>
+        <Text bold>{`${icon} ${state}`}</Text>
+        <Text tabular>{`${m.wpm} wpm`}</Text>
+      </Box>
+      <Box marginTop={1} flexDirection="column" alignItems="center">
+        {modeRow}
+      </Box>
+      <Box marginTop={1} flexDirection="column" alignItems="center">
+        <Text dimColor>{heard
+          ? 'Space play \u00b7 \u2191\u2193 speed \u00b7 \u2190\u2192 sentence \u00b7 c code'
+          : 'Click here, then press Space to start'}</Text>
+        {p.dropped > 0 && (
+          <Text dimColor>{`Oldest ${p.dropped} message${p.dropped === 1 ? '' : 's'} not included (too long)`}</Text>
+        )}
+      </Box>
     </Box>
   )
 }

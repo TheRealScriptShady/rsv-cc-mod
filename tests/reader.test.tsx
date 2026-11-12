@@ -47,10 +47,11 @@ async function mount($: any, surface: (typeof SURFACES)[number]) {
       for (const c of n.children ?? []) walk(c)
     }
     walk(tree)
-    const row = flat.find(
-      n => n.type === 'Box' && n.props?.flexDirection === 'row' && n.children?.[1]?.props?.color === 'red',
+    const line = flat.find(
+      n => n.type === 'Text' && n.props?.mono && n.props?.bold && (n.children ?? []).some((c: any) => c?.props?.color),
     )
-    return row ? row.children.map((c: any) => c.children.join('')).join('').trim() : undefined
+    const text = (n: any): string => (typeof n === 'string' ? n : (n?.children ?? []).map(text).join(''))
+    return line ? text(line).trim() : undefined
   }
   return { ui, find, word }
 }
