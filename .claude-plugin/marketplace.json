@@ -1,0 +1,6 @@
+{
+  "name": "rsv-cc-mod",
+  "description": "RSVP speed reader mod for Claude Code",
+  "owner": { "name": "TheRealScriptShady" },
+  "plugins": [{ "name": "rsvp-reader", "source": "./" }]
+}

@@ -1,0 +1,1 @@
+{ "name": "rsvp-reader", "version": "0.2.0", "license": "MIT", "description": "Speed-read the conversation one word at a time in a side pane (RSVP)", "types": "./types/index.d.ts" }
