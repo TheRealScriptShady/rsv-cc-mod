@@ -47,13 +47,33 @@ async function mount($: any, surface: (typeof SURFACES)[number]) {
       for (const c of n.children ?? []) walk(c)
     }
     walk(tree)
-    const line = flat.find(
-      n => n.type === 'Text' && n.props?.mono && n.props?.bold && (n.children ?? []).some((c: any) => c?.props?.color),
-    )
     const text = (n: any): string => (typeof n === 'string' ? n : (n?.children ?? []).map(text).join(''))
-    return line ? text(line).trim() : undefined
+    // The word line: the mono line whose bold parts are letters, not the guide.
+    const line = flat.find(
+      n =>
+        n.type === 'Text' &&
+        n.props?.mono &&
+        (n.children ?? []).some((c: any) => c?.props?.bold && /[A-Za-z.]/.test(text(c))),
+    )
+    if (!line) return undefined
+    return line.children.filter((c: any) => c?.props?.bold).map(text).join('').trim()
   }
-  return { ui, find, word }
+  /** The dimmed context words either side of the focus word. */
+  const context = async () => {
+    const tree: any = await ui.drawn({ in: 'reader' })
+    const out: string[] = []
+    const walk = (n: any, inLine = false) => {
+      if (!n || typeof n !== 'object') return
+      if (inLine && n.type === 'Text' && n.props?.dimColor && !n.props?.bold && n.props?.color === undefined) {
+        const t = (n.children ?? []).join('').trim()
+        if (t && !/[\u2500-\u257f]/.test(t)) out.push(t)
+      }
+      for (const c of n.children ?? []) walk(c, inLine || Boolean(n.type === 'Text' && n.props?.mono))
+    }
+    walk(tree)
+    return out
+  }
+  return { ui, find, word, context }
 }
 
 test('tokens: markdown stripped, code blocks are one token, sentences and messages marked', () => {
@@ -86,6 +106,8 @@ test('starts paused, Space plays, header shows speaker and message count', async
     expect(await word()).toBe('Look')
     await ui.key({ key: ' ' })
     await ui.advance(200)
+    expect(await word()).toBe('Look') // a soft start: the first words stay longer
+    await ui.advance(150)
     expect(await word()).toBe('below.')
     await ui.unmount()
   }
@@ -96,7 +118,7 @@ test('a code block pauses, shows its size, c views it, Space moves past', async 
   for (const surface of SURFACES) {
     const { ui, find, word } = await mount($, surface)
     await ui.key({ key: ' ' })
-    await ui.advance(200 + 400) // "Look" then "below." (sentence end)
+    await ui.advance(1000) // "Look" then "below." (sentence end)
     expect(await find(/\[code block, 3 lines\]/)).toBeDefined()
     expect(await find(/Paused/)).toBeDefined()
     await ui.advance(5000)
@@ -130,6 +152,47 @@ test('views: 2 is Claude only, 3 the whole thread with You/Claude labels', async
   }
 })
 
+test('context: up to two dimmed words either side, within the message', async ($, on) => {
+  seed(on)
+  for (const surface of SURFACES) {
+    const { ui, word, context } = await mount($, surface)
+    await ui.resize({ columns: 80, rows: 30 })
+    await ui.key({ key: '2' })
+    await ui.key({ key: 'right' })
+    expect(await word()).toBe('Second')
+    expect(await context()).toEqual(['sentence here.', 'one now.'])
+    await ui.key({ key: 'left' })
+    expect(await word()).toBe('First')
+    expect(await context()).toEqual(['sentence here.'])
+    await ui.unmount()
+  }
+})
+
+test('a new word fades in, then shows at full strength', async ($, on) => {
+  seed(on)
+  const { ui, word } = await mount($, 'desktop')
+  const focusDim = async () => {
+    const tree: any = await ui.drawn({ in: 'reader' })
+    let dim: boolean | undefined
+    const walk = (n: any) => {
+      if (!n || typeof n !== 'object') return
+      if (n.type === 'Text' && n.props?.bold && n.props?.color && /^[A-Za-z]$/.test((n.children ?? []).join(''))) {
+        dim = Boolean(n.props.dimColor)
+      }
+      for (const c of n.children ?? []) walk(c)
+    }
+    walk(tree)
+    return dim
+  }
+  await ui.key({ key: '2' })
+  await ui.key({ key: 'right' })
+  expect(await word()).toBe('Second')
+  expect(await focusDim()).toBe(true)
+  await ui.advance(50)
+  expect(await focusDim()).toBe(false)
+  await ui.unmount()
+})
+
 test('Left/Right jump by sentence', async ($, on) => {
   seed(on)
   for (const surface of SURFACES) {
@@ -153,11 +216,12 @@ test('a longer pause between messages', async ($, on) => {
   await ui.key({ key: '2' })
   await ui.key({ key: 'right' }) // "Second one now." ends message 1
   await ui.key({ key: ' ' })
-  await ui.advance(200 + 200) // Second, one
+  // Soft start: x1.6, x1.5, x1.4 for the first three words.
+  await ui.advance(320 + 300) // Second, one
   expect(await word()).toBe('now.')
-  await ui.advance(400) // a sentence end alone would be done by now
+  await ui.advance(1000) // a sentence end alone (560 ms) would be done by now
   expect(await word()).toBe('now.')
-  await ui.advance(700)
+  await ui.advance(600)
   expect(await word()).toBe('Look')
   await ui.unmount()
 })

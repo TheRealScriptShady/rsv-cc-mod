@@ -36,16 +36,25 @@ type Model = {
   playing: boolean
   wpm: number
   showCode: boolean
+  /** False for the first moment a word is shown (its fade-in). */
+  lit: boolean
 }
 
-const SIDE = 12 // characters each side of the focus letter
+/** Characters each side of the focus letter, set from the region's width. */
+let side = 14
+/** Words left in a soft start: each shows a little longer, easing into speed. */
+let ramp = 0
+const RAMP_WORDS = 6
+/** A new word draws softly this long before full brightness. */
+const FADE_MS = 45
 const WPM_MIN = 150
 const WPM_MAX = 900
 const WPM_STEP = 25
 const clampWpm = (w: number) => Math.min(WPM_MAX, Math.max(WPM_MIN, Math.round(w)))
 const CLAUDE = '#D97757'
 const YOU = '#5B9BD5'
-const FOCUS = '#FF5555'
+const FOCUS = '#FF6B5E'
+const RULE = '#5A5A5A'
 const TRACK = '#3A3A3A'
 
 // One reader instance at a time: what its timer and handlers read.
@@ -66,28 +75,67 @@ function data(mode: Mode) {
   return cache
 }
 
+/** Up to two words before (dir -1) or after (1) token i, in its message, within room. */
+function context(toks: Tok[], i: number, dir: -1 | 1, room: number): string {
+  const here = toks[i]
+  if (!here || here.code) return ''
+  const picked: string[] = []
+  let used = 0
+  for (let k = i + dir; picked.length < 2; k += dir) {
+    const t = toks[k]
+    if (!t || t.code || t.m !== here.m) break
+    const need = t.w.length + (picked.length > 0 ? 1 : 0)
+    if (used + need > room) break
+    used += need
+    if (dir < 0) picked.unshift(t.w)
+    else picked.push(t.w)
+  }
+  return picked.join(' ')
+}
+
 const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p, s) => {
   const { Box, Text, Button, Code } = s.elements
   props = p
   barWidth = Math.max(10, (s.columns || 42) - 2) // less the side padding
+  // The big type is wider than the body's cells: keep the word line inside.
+  side = Math.min(22, Math.max(10, Math.floor(((s.columns || 42) / 1.5 - 1) / 2)))
   let m = s.state
 
   if (m === undefined) {
     let stop: (() => void) | undefined
+    let fadeStop: (() => void) | undefined
+    let wasPlaying = false
     const schedule = (cur: Model) => {
       stop?.()
       stop = undefined
+      fadeStop?.()
+      fadeStop = undefined
+      // Starting to play eases in over the first few words.
+      if (cur.playing && !wasPlaying) ramp = RAMP_WORDS
+      wasPlaying = cur.playing
       const { toks } = data(cur.mode)
       const tok = toks[cur.i]
+      if (!cur.lit) {
+        fadeStop = s.every(FADE_MS, () => {
+          fadeStop?.()
+          fadeStop = undefined
+          const now = s.state
+          if (now && !now.lit) s.setState({ ...now, lit: true })
+        })
+      }
       if (!cur.playing || !tok || tok.code) return
-      stop = s.every(delayMs(tok, cur.wpm), () => {
+      const ms = delayMs(tok, cur.wpm) * (1 + 0.1 * ramp)
+      stop = s.every(ms, () => {
         const now = s.state
         if (!now) return
-        const total = data(now.mode).toks.length
-        const i = Math.min(total, now.i + 1)
-        const nextTok = data(now.mode).toks[i]
+        ramp = Math.max(0, ramp - 1)
+        const { toks: all } = data(now.mode)
+        const i = Math.min(all.length, now.i + 1)
+        const nextTok = all[i]
+        // A fade only where the word stays long enough for it to read as one.
+        const lit = nextTok === undefined || delayMs(nextTok, now.wpm) < 160
         // Stop at the end, and on a code block (it is never flashed).
-        set({ ...now, i, playing: i < total && !nextTok?.code })
+        set({ ...now, i, lit, playing: i < all.length && !nextTok?.code })
       })
     }
     set = next => {
@@ -95,7 +143,10 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
       schedule(next)
     }
     const save = (cur: Model) => s.post({ wpm: cur.wpm, mode: cur.mode })
-    const jump = (cur: Model, i: number) => set({ ...cur, i, showCode: false })
+    const jump = (cur: Model, i: number) => {
+      if (cur.playing) ramp = RAMP_WORDS
+      set({ ...cur, i, showCode: false, lit: false })
+    }
 
     s.onKey(k => {
       const cur = s.state
@@ -139,18 +190,18 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
       jump(cur, startOf(starts, at))
     })
 
-    m = { id: p.id, mode: p.mode, modeSeq: p.modeSeq, i: 0, playing: false, wpm: clampWpm(p.wpm), showCode: false }
+    m = { id: p.id, mode: p.mode, modeSeq: p.modeSeq, i: 0, playing: false, wpm: clampWpm(p.wpm), showCode: false, lit: true }
     set(m)
   } else if (m.modeSeq !== p.modeSeq) {
     // /rsvp <mode> was run.
-    m = { ...m, id: p.id, mode: p.mode, modeSeq: p.modeSeq, i: 0, playing: false, showCode: false }
+    m = { ...m, id: p.id, mode: p.mode, modeSeq: p.modeSeq, i: 0, playing: false, showCode: false, lit: true }
     set(m)
   } else if (m.id !== p.id) {
     // The thread grew. The latest-reply view starts over on the new reply;
     // the others keep their place (new text was appended after it).
     const total = data(m.mode).toks.length
     const i = m.mode === 'latest' ? 0 : Math.min(m.i, total)
-    m = { ...m, id: p.id, i, playing: m.mode === 'latest' ? false : m.playing, showCode: false }
+    m = { ...m, id: p.id, i, playing: m.mode === 'latest' ? false : m.playing, showCode: false, lit: true }
     set(m)
   }
 
@@ -218,23 +269,39 @@ const Reader: ClientModule<ReaderProps & { [k: string]: JsonValue }, Model> = (p
     )
   } else {
     // A line of fixed width, centered: the focus letter sits in its middle
-    // whatever the word, so it never moves.
+    // whatever the word, so it never moves. Up to two words either side, in
+    // the same message, show dimmed for context.
     const word = done ? 'Done.' : (tok?.w ?? '')
     const o = orpIndex(word)
     const left = word.slice(0, o)
     const right = word.slice(o + 1)
-    const pre = ' '.repeat(Math.max(0, SIDE - left.length)) + left
-    const post = right + ' '.repeat(Math.max(0, SIDE - right.length))
-    const guide = ' '.repeat(SIDE) + '\u2502' + ' '.repeat(SIDE)
+    const before = done ? '' : context(toks, m.i, -1, side - left.length - 1)
+    const after = done ? '' : context(toks, m.i, 1, side - right.length - 1)
+    const padL = ' '.repeat(Math.max(0, side - left.length - (before ? before.length + 1 : 0)))
+    const padR = ' '.repeat(Math.max(0, side - right.length - (after ? after.length + 1 : 0)))
+    const arm = '\u2501'.repeat(side)
+    const soft = !m.lit
     stage = (
       <Box flexDirection="column" alignItems="center" paddingY={2}>
-        <Text mono size="title" dimColor>{guide}</Text>
-        <Text mono size="title" bold>
-          {pre}
-          <Text color={FOCUS}>{word.slice(o, o + 1)}</Text>
-          {post}
+        <Text mono size="title">
+          <Text color={RULE}>{arm}</Text>
+          <Text color={FOCUS} bold>{'\u2533'}</Text>
+          <Text color={RULE}>{arm}</Text>
         </Text>
-        <Text mono size="title" dimColor>{guide}</Text>
+        <Text mono size="title">
+          {padL}
+          {before !== '' && <Text dimColor>{before + ' '}</Text>}
+          <Text bold dimColor={soft}>{left}</Text>
+          <Text bold color={FOCUS} dimColor={soft}>{word.slice(o, o + 1)}</Text>
+          <Text bold dimColor={soft}>{right}</Text>
+          {after !== '' && <Text dimColor>{' ' + after}</Text>}
+          {padR}
+        </Text>
+        <Text mono size="title">
+          <Text color={RULE}>{arm}</Text>
+          <Text color={FOCUS} bold>{'\u253b'}</Text>
+          <Text color={RULE}>{arm}</Text>
+        </Text>
       </Box>
     )
   }
